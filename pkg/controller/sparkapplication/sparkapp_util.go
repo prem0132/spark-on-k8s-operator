@@ -18,18 +18,17 @@ package sparkapplication
 
 import (
 	"fmt"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/kubernetes/pkg/apis/policy"
 
-	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta1"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/config"
 	apiv1 "k8s.io/api/core/v1"
 )
 
 // Helper method to create a key with namespace and appName
-func createMetaNamespaceKey(pod *apiv1.Pod) (string, bool) {
-	if appName, ok := getAppName(pod); ok {
-		return fmt.Sprintf("%s/%s", pod.GetNamespace(), appName), true
-	}
-	return "", false
+func createMetaNamespaceKey(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
 }
 
 func getAppName(pod *apiv1.Pod) (string, bool) {
@@ -37,60 +36,100 @@ func getAppName(pod *apiv1.Pod) (string, bool) {
 	return appName, ok
 }
 
-func isDriverPod(pod *apiv1.Pod) bool {
-	return pod.Labels[config.SparkRoleLabel] == sparkDriverRole
-}
-
-func isExecutorPod(pod *apiv1.Pod) bool {
-	return pod.Labels[config.SparkRoleLabel] == sparkExecutorRole
-}
-
 func getSparkApplicationID(pod *apiv1.Pod) string {
 	return pod.Labels[config.SparkApplicationSelectorLabel]
 }
 
-func getDefaultDriverPodName(app *v1beta1.SparkApplication) string {
+func getDriverPodName(app *v1beta2.SparkApplication) string {
+	name := app.Spec.Driver.PodName
+	if name != nil && len(*name) > 0 {
+		return *name
+	}
+
+	sparkConf := app.Spec.SparkConf
+	if sparkConf[config.SparkDriverPodNameKey] != "" {
+		return sparkConf[config.SparkDriverPodNameKey]
+	}
+
 	return fmt.Sprintf("%s-driver", app.Name)
 }
 
-func getDefaultUIServiceName(app *v1beta1.SparkApplication) string {
+func getDefaultUIServiceName(app *v1beta2.SparkApplication) string {
 	return fmt.Sprintf("%s-ui-svc", app.Name)
 }
 
-func getDefaultUIIngressName(app *v1beta1.SparkApplication) string {
+func getDefaultUIIngressName(app *v1beta2.SparkApplication) string {
 	return fmt.Sprintf("%s-ui-ingress", app.Name)
 }
 
-func podPhaseToExecutorState(podPhase apiv1.PodPhase) v1beta1.ExecutorState {
+func getResourceLabels(app *v1beta2.SparkApplication) map[string]string {
+	labels := map[string]string{config.SparkAppNameLabel: app.Name}
+	if app.Status.SubmissionID != "" {
+		labels[config.SubmissionIDLabel] = app.Status.SubmissionID
+	}
+	return labels
+}
+
+func podPhaseToExecutorState(podPhase apiv1.PodPhase) v1beta2.ExecutorState {
 	switch podPhase {
 	case apiv1.PodPending:
-		return v1beta1.ExecutorPendingState
+		return v1beta2.ExecutorPendingState
 	case apiv1.PodRunning:
-		return v1beta1.ExecutorRunningState
+		return v1beta2.ExecutorRunningState
 	case apiv1.PodSucceeded:
-		return v1beta1.ExecutorCompletedState
+		return v1beta2.ExecutorCompletedState
 	case apiv1.PodFailed:
-		return v1beta1.ExecutorFailedState
+		return v1beta2.ExecutorFailedState
 	default:
-		return v1beta1.ExecutorUnknownState
+		return v1beta2.ExecutorUnknownState
 	}
 }
 
-func isExecutorTerminated(executorState v1beta1.ExecutorState) bool {
-	return executorState == v1beta1.ExecutorCompletedState || executorState == v1beta1.ExecutorFailedState
+func isExecutorTerminated(executorState v1beta2.ExecutorState) bool {
+	return executorState == v1beta2.ExecutorCompletedState || executorState == v1beta2.ExecutorFailedState
 }
 
-func driverPodPhaseToApplicationState(podPhase apiv1.PodPhase) v1beta1.ApplicationStateType {
-	switch podPhase {
+func isDriverRunning(app *v1beta2.SparkApplication) bool {
+	return app.Status.AppState.State == v1beta2.RunningState
+}
+
+func driverStateToApplicationState(podStatus apiv1.PodStatus) v1beta2.ApplicationStateType {
+	switch podStatus.Phase {
 	case apiv1.PodPending:
-		return v1beta1.SubmittedState
+		return v1beta2.SubmittedState
 	case apiv1.PodRunning:
-		return v1beta1.RunningState
+		// TODO: upcoming Kubernenetes feature will make this code redundant
+		// https://github.com/kubernetes/enhancements/issues/753
+		for _, c := range podStatus.ContainerStatuses {
+			if c.Name == config.SparkDriverContainerName {
+				if c.State.Terminated != nil {
+					if c.State.Terminated.ExitCode == 0 {
+						return v1beta2.SucceedingState
+					}
+					return v1beta2.FailingState
+				}
+				break
+			}
+		}
+		return v1beta2.RunningState
 	case apiv1.PodSucceeded:
-		return v1beta1.SucceedingState
+		return v1beta2.SucceedingState
 	case apiv1.PodFailed:
-		return v1beta1.FailingState
+		return v1beta2.FailingState
 	default:
-		return v1beta1.UnknownState
+		return v1beta2.UnknownState
 	}
+}
+
+func getVolumeFSType(v v1.Volume) (policy.FSType, error) {
+	switch {
+	case v.HostPath != nil:
+		return policy.HostPath, nil
+	case v.EmptyDir != nil:
+		return policy.EmptyDir, nil
+	case v.PersistentVolumeClaim != nil:
+		return policy.PersistentVolumeClaim, nil
+	}
+
+	return "", fmt.Errorf("unknown volume type for volume: %#v", v)
 }

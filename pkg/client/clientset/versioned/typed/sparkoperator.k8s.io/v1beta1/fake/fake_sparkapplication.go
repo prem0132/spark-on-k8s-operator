@@ -36,9 +36,9 @@ type FakeSparkApplications struct {
 	ns   string
 }
 
-var sparkapplicationsResource = schema.GroupVersionResource{Group: "sparkoperator", Version: "v1beta1", Resource: "sparkapplications"}
+var sparkapplicationsResource = schema.GroupVersionResource{Group: "sparkoperator.k8s.io", Version: "v1beta1", Resource: "sparkapplications"}
 
-var sparkapplicationsKind = schema.GroupVersionKind{Group: "sparkoperator", Version: "v1beta1", Kind: "SparkApplication"}
+var sparkapplicationsKind = schema.GroupVersionKind{Group: "sparkoperator.k8s.io", Version: "v1beta1", Kind: "SparkApplication"}
 
 // Get takes name of the sparkApplication, and returns the corresponding sparkApplication object, and an error if there is any.
 func (c *FakeSparkApplications) Get(name string, options v1.GetOptions) (result *v1beta1.SparkApplication, err error) {
@@ -121,7 +121,7 @@ func (c *FakeSparkApplications) DeleteCollection(options *v1.DeleteOptions, list
 // Patch applies the patch and returns the patched sparkApplication.
 func (c *FakeSparkApplications) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1beta1.SparkApplication, err error) {
 	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(sparkapplicationsResource, c.ns, name, data, subresources...), &v1beta1.SparkApplication{})
+		Invokes(testing.NewPatchSubresourceAction(sparkapplicationsResource, c.ns, name, pt, data, subresources...), &v1beta1.SparkApplication{})
 
 	if obj == nil {
 		return nil, err

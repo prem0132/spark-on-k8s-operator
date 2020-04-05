@@ -22,7 +22,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta1"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/util"
 )
 
@@ -30,20 +30,25 @@ type sparkAppMetrics struct {
 	labels []string
 	prefix string
 
-	sparkAppSubmitCount  *prometheus.CounterVec
-	sparkAppSuccessCount *prometheus.CounterVec
-	sparkAppFailureCount *prometheus.CounterVec
-	sparkAppRunningCount *util.PositiveGauge
+	sparkAppSubmitCount           *prometheus.CounterVec
+	sparkAppSuccessCount          *prometheus.CounterVec
+	sparkAppFailureCount          *prometheus.CounterVec
+	sparkAppFailedSubmissionCount *prometheus.CounterVec
+	sparkAppRunningCount          *util.PositiveGauge
 
-	sparkAppSuccessExecutionTime *prometheus.SummaryVec
-	sparkAppFailureExecutionTime *prometheus.SummaryVec
+	sparkAppSuccessExecutionTime  *prometheus.SummaryVec
+	sparkAppFailureExecutionTime  *prometheus.SummaryVec
+	sparkAppStartLatency          *prometheus.SummaryVec
+	sparkAppStartLatencyHistogram *prometheus.HistogramVec
 
 	sparkAppExecutorRunningCount *util.PositiveGauge
 	sparkAppExecutorFailureCount *prometheus.CounterVec
 	sparkAppExecutorSuccessCount *prometheus.CounterVec
 }
 
-func newSparkAppMetrics(prefix string, labels []string) *sparkAppMetrics {
+func newSparkAppMetrics(metricsConfig *util.MetricConfig) *sparkAppMetrics {
+	prefix := metricsConfig.MetricsPrefix
+	labels := metricsConfig.MetricsLabels
 	validLabels := make([]string, len(labels))
 	for i, label := range labels {
 		validLabels[i] = util.CreateValidMetricNameLabel("", label)
@@ -70,6 +75,13 @@ func newSparkAppMetrics(prefix string, labels []string) *sparkAppMetrics {
 		},
 		validLabels,
 	)
+	sparkAppFailedSubmissionCount := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: util.CreateValidMetricNameLabel(prefix, "spark_app_failed_submission_count"),
+			Help: "Spark App Failed Submission Count via the Operator",
+		},
+		validLabels,
+	)
 	sparkAppSuccessExecutionTime := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Name: util.CreateValidMetricNameLabel(prefix, "spark_app_success_execution_time_microseconds"),
@@ -84,10 +96,18 @@ func newSparkAppMetrics(prefix string, labels []string) *sparkAppMetrics {
 		},
 		validLabels,
 	)
-	sparkAppExecutorFailureCount := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: util.CreateValidMetricNameLabel(prefix, "spark_app_executor_failure_count"),
-			Help: "Spark App Failed Executor Count via the Operator",
+	sparkAppStartLatency := prometheus.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name: util.CreateValidMetricNameLabel(prefix, "spark_app_start_latency_microseconds"),
+			Help: "Spark App Start Latency via the Operator",
+		},
+		validLabels,
+	)
+	sparkAppStartLatencyHistogram := prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    util.CreateValidMetricNameLabel(prefix, "spark_app_start_latency_seconds"),
+			Help:    "Spark App Start Latency counts in buckets via the Operator",
+			Buckets: metricsConfig.MetricsJobStartLatencyBuckets,
 		},
 		validLabels,
 	)
@@ -98,23 +118,33 @@ func newSparkAppMetrics(prefix string, labels []string) *sparkAppMetrics {
 		},
 		validLabels,
 	)
+	sparkAppExecutorFailureCount := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: util.CreateValidMetricNameLabel(prefix, "spark_app_executor_failure_count"),
+			Help: "Spark App Failed Executor Count via the Operator",
+		},
+		validLabels,
+	)
 	sparkAppRunningCount := util.NewPositiveGauge(util.CreateValidMetricNameLabel(prefix, "spark_app_running_count"),
 		"Spark App Running Count via the Operator", validLabels)
 	sparkAppExecutorRunningCount := util.NewPositiveGauge(util.CreateValidMetricNameLabel(prefix,
 		"spark_app_executor_running_count"), "Spark App Running Executor Count via the Operator", validLabels)
 
 	return &sparkAppMetrics{
-		labels:                       validLabels,
-		prefix:                       prefix,
-		sparkAppSubmitCount:          sparkAppSubmitCount,
-		sparkAppSuccessCount:         sparkAppSuccessCount,
-		sparkAppFailureCount:         sparkAppFailureCount,
-		sparkAppRunningCount:         sparkAppRunningCount,
-		sparkAppSuccessExecutionTime: sparkAppSuccessExecutionTime,
-		sparkAppFailureExecutionTime: sparkAppFailureExecutionTime,
-		sparkAppExecutorRunningCount: sparkAppExecutorRunningCount,
-		sparkAppExecutorFailureCount: sparkAppExecutorFailureCount,
-		sparkAppExecutorSuccessCount: sparkAppExecutorSuccessCount,
+		labels:                        validLabels,
+		prefix:                        prefix,
+		sparkAppSubmitCount:           sparkAppSubmitCount,
+		sparkAppRunningCount:          sparkAppRunningCount,
+		sparkAppSuccessCount:          sparkAppSuccessCount,
+		sparkAppFailureCount:          sparkAppFailureCount,
+		sparkAppFailedSubmissionCount: sparkAppFailedSubmissionCount,
+		sparkAppSuccessExecutionTime:  sparkAppSuccessExecutionTime,
+		sparkAppFailureExecutionTime:  sparkAppFailureExecutionTime,
+		sparkAppStartLatency:          sparkAppStartLatency,
+		sparkAppStartLatencyHistogram: sparkAppStartLatencyHistogram,
+		sparkAppExecutorRunningCount:  sparkAppExecutorRunningCount,
+		sparkAppExecutorSuccessCount:  sparkAppExecutorSuccessCount,
+		sparkAppExecutorFailureCount:  sparkAppExecutorFailureCount,
 	}
 }
 
@@ -124,34 +154,33 @@ func (sm *sparkAppMetrics) registerMetrics() {
 	util.RegisterMetric(sm.sparkAppFailureCount)
 	util.RegisterMetric(sm.sparkAppSuccessExecutionTime)
 	util.RegisterMetric(sm.sparkAppFailureExecutionTime)
-	util.RegisterMetric(sm.sparkAppExecutorFailureCount)
+	util.RegisterMetric(sm.sparkAppStartLatency)
+	util.RegisterMetric(sm.sparkAppStartLatencyHistogram)
 	util.RegisterMetric(sm.sparkAppExecutorSuccessCount)
+	util.RegisterMetric(sm.sparkAppExecutorFailureCount)
 	sm.sparkAppRunningCount.Register()
 	sm.sparkAppExecutorRunningCount.Register()
 }
 
-func (sm *sparkAppMetrics) exportMetrics(oldApp, newApp *v1beta1.SparkApplication) {
-	metricLabels := fetchMetricLabels(newApp.Labels, sm.labels)
+func (sm *sparkAppMetrics) exportMetrics(oldApp, newApp *v1beta2.SparkApplication) {
+	metricLabels := fetchMetricLabels(newApp, sm.labels)
 	glog.V(2).Infof("Exporting metrics for %s; old status: %v new status: %v", newApp.Name,
 		oldApp.Status, newApp.Status)
 
 	oldState := oldApp.Status.AppState.State
 	newState := newApp.Status.AppState.State
-	switch newState {
-	case v1beta1.SubmittedState:
-		if oldState != newState {
+	if newState != oldState {
+		switch newState {
+		case v1beta2.SubmittedState:
 			if m, err := sm.sparkAppSubmitCount.GetMetricWith(metricLabels); err != nil {
 				glog.Errorf("Error while exporting metrics: %v", err)
 			} else {
 				m.Inc()
 			}
-		}
-	case v1beta1.RunningState:
-		if oldState != newState {
+		case v1beta2.RunningState:
 			sm.sparkAppRunningCount.Inc(metricLabels)
-		}
-	case v1beta1.SucceedingState, v1beta1.CompletedState:
-		if oldState != newState {
+			sm.exportJobStartLatencyMetrics(newApp, metricLabels)
+		case v1beta2.SucceedingState:
 			if !newApp.Status.LastSubmissionAttemptTime.Time.IsZero() && !newApp.Status.TerminationTime.Time.IsZero() {
 				d := newApp.Status.TerminationTime.Time.Sub(newApp.Status.LastSubmissionAttemptTime.Time)
 
@@ -167,9 +196,7 @@ func (sm *sparkAppMetrics) exportMetrics(oldApp, newApp *v1beta1.SparkApplicatio
 			} else {
 				m.Inc()
 			}
-		}
-	case v1beta1.FailingState, v1beta1.FailedState, v1beta1.FailedSubmissionState:
-		if oldState != newState {
+		case v1beta2.FailingState:
 			if !newApp.Status.LastSubmissionAttemptTime.Time.IsZero() && !newApp.Status.TerminationTime.Time.IsZero() {
 				d := newApp.Status.TerminationTime.Time.Sub(newApp.Status.LastSubmissionAttemptTime.Time)
 				if m, err := sm.sparkAppFailureExecutionTime.GetMetricWith(metricLabels); err != nil {
@@ -184,19 +211,37 @@ func (sm *sparkAppMetrics) exportMetrics(oldApp, newApp *v1beta1.SparkApplicatio
 			} else {
 				m.Inc()
 			}
+		case v1beta2.FailedSubmissionState:
+			if m, err := sm.sparkAppFailedSubmissionCount.GetMetricWith(metricLabels); err != nil {
+				glog.Errorf("Error while exporting metrics: %v", err)
+			} else {
+				m.Inc()
+			}
+		}
+	}
+
+	// In the event that state transitions happened too quickly and the spark app skipped the RUNNING state, the job
+	// start latency should still be captured.
+	// Note: There is an edge case that a Submitted state can go directly to a Failing state if the driver pod is
+	//       deleted. This is very unlikely if not being done intentionally, so we choose not to handle it.
+	if newState != oldState {
+		if (newState == v1beta2.FailingState || newState == v1beta2.SucceedingState) && oldState == v1beta2.SubmittedState {
+			// TODO: remove this log once we've gathered some data in prod fleets.
+			glog.V(2).Infof("Calculating job start latency metrics for edge case transition from %v to %v in app %v in namespace %v.", oldState, newState, newApp.Name, newApp.Namespace)
+			sm.exportJobStartLatencyMetrics(newApp, metricLabels)
 		}
 	}
 
 	// Potential Executor status updates
 	for executor, newExecState := range newApp.Status.ExecutorState {
 		switch newExecState {
-		case v1beta1.ExecutorRunningState:
+		case v1beta2.ExecutorRunningState:
 			if oldApp.Status.ExecutorState[executor] != newExecState {
 				glog.V(2).Infof("Exporting Metrics for Executor %s. OldState: %v NewState: %v", executor,
 					oldApp.Status.ExecutorState[executor], newExecState)
 				sm.sparkAppExecutorRunningCount.Inc(metricLabels)
 			}
-		case v1beta1.ExecutorCompletedState:
+		case v1beta2.ExecutorCompletedState:
 			if oldApp.Status.ExecutorState[executor] != newExecState {
 				glog.V(2).Infof("Exporting Metrics for Executor %s. OldState: %v NewState: %v", executor,
 					oldApp.Status.ExecutorState[executor], newExecState)
@@ -207,7 +252,7 @@ func (sm *sparkAppMetrics) exportMetrics(oldApp, newApp *v1beta1.SparkApplicatio
 					m.Inc()
 				}
 			}
-		case v1beta1.ExecutorFailedState:
+		case v1beta2.ExecutorFailedState:
 			if oldApp.Status.ExecutorState[executor] != newExecState {
 				glog.V(2).Infof("Exporting Metrics for Executor %s. OldState: %v NewState: %v", executor,
 					oldApp.Status.ExecutorState[executor], newExecState)
@@ -222,7 +267,27 @@ func (sm *sparkAppMetrics) exportMetrics(oldApp, newApp *v1beta1.SparkApplicatio
 	}
 }
 
-func fetchMetricLabels(specLabels map[string]string, labels []string) map[string]string {
+func (sm *sparkAppMetrics) exportJobStartLatencyMetrics(app *v1beta2.SparkApplication, labels map[string]string) {
+	// Expose the job start latency related metrics of an SparkApp only once when it runs for the first time
+	if app.Status.ExecutionAttempts == 1 {
+		latency := time.Now().Sub(app.CreationTimestamp.Time)
+		if m, err := sm.sparkAppStartLatency.GetMetricWith(labels); err != nil {
+			glog.Errorf("Error while exporting metrics: %v", err)
+		} else {
+			m.Observe(float64(latency / time.Microsecond))
+		}
+		if m, err := sm.sparkAppStartLatencyHistogram.GetMetricWith(labels); err != nil {
+			glog.Errorf("Error while exporting metrics: %v", err)
+		} else {
+			m.Observe(float64(latency / time.Second))
+		}
+
+	}
+}
+
+func fetchMetricLabels(app *v1beta2.SparkApplication, labels []string) map[string]string {
+	specLabels := app.Labels
+
 	// Transform spec labels since our labels names might be not same as specLabels if we removed invalid characters.
 	validSpecLabels := make(map[string]string)
 	for labelKey, v := range specLabels {
@@ -234,6 +299,8 @@ func fetchMetricLabels(specLabels map[string]string, labels []string) map[string
 	for _, label := range labels {
 		if value, ok := validSpecLabels[label]; ok {
 			metricLabels[label] = value
+		} else if label == "namespace" { // if the "namespace" label is in the metrics config, use it
+			metricLabels[label] = app.Namespace
 		} else {
 			metricLabels[label] = "Unknown"
 		}
